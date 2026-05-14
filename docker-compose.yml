@@ -1,0 +1,127 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_CLEANER_ENABLE: "true"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+  voter_registration:
+    build: .
+    command: node services/voter-registration/index.js
+    restart: on-failure
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKERS: kafka:29092
+
+  user_validation:
+    build: .
+    command: node services/user-validation/index.js
+    restart: on-failure
+    depends_on:
+      - kafka
+      - rabbitmq
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      RABBITMQ_URL: amqp://rabbitmq
+
+  voting_api:
+    build: .
+    command: node services/voting-api/index.js
+    restart: on-failure
+    ports:
+      - "3000:3000"
+    depends_on:
+      - kafka
+      - rabbitmq
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      RABBITMQ_URL: amqp://rabbitmq
+
+  vote_processor:
+    build: .
+    command: node services/vote-processor/index.js
+    restart: on-failure
+    depends_on:
+      - kafka
+      - rabbitmq
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      RABBITMQ_URL: amqp://rabbitmq
+
+  regional_rollup:
+    build: .
+    command: node services/regional-rollup/index.js
+    restart: on-failure
+    depends_on:
+      - kafka
+      - rabbitmq
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      RABBITMQ_URL: amqp://rabbitmq
+
+  bot_detector:
+    build: .
+    command: node services/bot-detector/index.js
+    restart: on-failure
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKERS: kafka:29092
+
+  analytics_archiver:
+    build: .
+    command: node services/analytics-archiver/index.js
+    restart: on-failure
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKERS: kafka:29092
+
+  global_dashboard:
+    build: .
+    command: node services/global-dashboard/index.js
+    restart: on-failure
+    ports:
+      - "4000:4000"
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_URL: amqp://rabbitmq
+
+  regional_dashboard:
+    build: .
+    command: node services/regional-dashboard/index.js
+    restart: on-failure
+    ports:
+      - "4001:4001"
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_URL: amqp://rabbitmq
