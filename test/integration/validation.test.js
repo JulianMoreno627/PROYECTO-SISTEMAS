@@ -11,7 +11,7 @@ describe('Integration: User Validation (RPC)', () => {
   let admin;
 
   beforeAll(async () => {
-    await waitForService('http://localhost:3000', 30, 2000);
+    await waitForService('http://localhost:3000/health', 30, 2000);
     await new Promise((r) => setTimeout(r, WAIT_FOR_STARTUP));
     admin = await createKafkaAdmin();
   }, 60000);
@@ -130,8 +130,8 @@ describe('Integration: User Validation (RPC)', () => {
       const config = await admin.describeConfigs({
         resources: [{ type: 2, name: 'eligible_voters' }],
       });
-      const compactConfig = config[0].configEntries.find((c) => c.name === 'cleanup.policy');
-      expect(compactConfig.value).toBe('compact');
+      const compactConfig = config.resources[0].configEntries.find((c) => c.configName === 'cleanup.policy');
+      expect(compactConfig?.configValue).toBe('compact');
     });
 
     it('voters are stored with user_id as key', async () => {

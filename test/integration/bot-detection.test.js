@@ -12,7 +12,7 @@ describe('Integration: Bot Detection', () => {
   let admin;
 
   beforeAll(async () => {
-    await waitForService('http://localhost:3000', 30, 2000);
+    await waitForService('http://localhost:3000/health', 30, 2000);
     await new Promise((r) => setTimeout(r, WAIT_FOR_STARTUP));
     admin = await createKafkaAdmin();
   }, 60000);
@@ -36,7 +36,8 @@ describe('Integration: Bot Detection', () => {
         await new Promise((r) => setTimeout(r, 500));
       }
 
-      const consumer = await createKafkaConsumer('test-bot-detection', 'security_alerts', true);
+      const groupId = `test-bot-${Date.now()}`;
+      const consumer = await createKafkaConsumer(groupId, 'security_alerts', true);
       let alert = null;
 
       await consumer.run({
@@ -58,32 +59,40 @@ describe('Integration: Bot Detection', () => {
     });
 
     it('does NOT alert when votes come from different IPs', async () => {
-      const consumer = await createKafkaConsumer('test-no-bot', 'security_alerts', true);
-      const alerts = [];
-
-      await consumer.run({
-        eachMessage: async ({ message }) => {
-          alerts.push(JSON.parse(message.value.toString()));
-        },
-      });
-
+      const uniqueBaseIp = '10.88.88';
       const users = ['ana', 'juan', 'pedro', 'lucia', 'carlos', 'maria'];
+      const userIps = {};
+
+      // Submit votes from different IPs
       for (let i = 0; i < users.length; i++) {
+        const ip = `${uniqueBaseIp}.${i}`;
+        userIps[users[i]] = ip;
         await submitVote({
           user_id: users[i],
           candidate_id: 'A',
           region: 'Norte',
-          ip_address: `10.88.${i}.1`,
+          ip_address: ip,
         });
         await new Promise((r) => setTimeout(r, 500));
       }
 
+      // Check that no alert was generated for any of these IPs
+      const groupId = `test-no-bot-${Date.now()}`;
+      const consumer = await createKafkaConsumer(groupId, 'security_alerts', true);
+      const relevantAlerts = [];
+
+      await consumer.run({
+        eachMessage: async ({ message }) => {
+          const alert = JSON.parse(message.value.toString());
+          if (users.some((u) => alert.users && alert.users.includes(u) && alert.ip === userIps[u])) {
+            relevantAlerts.push(alert);
+          }
+        },
+      });
+
       await new Promise((r) => setTimeout(r, 5000));
       await consumer.disconnect();
 
-      const relevantAlerts = alerts.filter((a) =>
-        users.some((u) => a.users && a.users.includes(u))
-      );
       expect(relevantAlerts).toHaveLength(0);
     });
   });
@@ -108,7 +117,8 @@ describe('Integration: Bot Detection', () => {
         await new Promise((r) => setTimeout(r, 300));
       }
 
-      const consumer = await createKafkaConsumer('test-alert-structure', 'security_alerts', true);
+      const groupId = `test-alert-structure-${Date.now()}`;
+      const consumer = await createKafkaConsumer(groupId, 'security_alerts', true);
       let alert = null;
 
       await consumer.run({

@@ -16,6 +16,7 @@ const admin = kafka.admin();
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
 let amqpChannel, replyQueue;
+let isReady = false;
 const pendingRPCs = new Map();
 
 async function initKafka() {
@@ -75,6 +76,10 @@ async function validateUserRPC(userId) {
   });
 }
 
+app.get('/health', (req, res) => {
+  res.status(isReady ? 200 : 503).json({ status: isReady ? 'ready' : 'starting' });
+});
+
 app.post('/vote', async (req, res) => {
   const { user_id, candidate_id, region, ip_address } = req.body;
 
@@ -109,6 +114,7 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initKafka();
   await initRabbit();
+  isReady = true;
   app.listen(PORT, () => console.log(`Voting API listening on port ${PORT}`));
 }
 

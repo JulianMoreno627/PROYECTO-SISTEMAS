@@ -2,10 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   createKafkaAdmin,
   createKafkaConsumer,
-  createRabbitChannel,
   submitVote,
   waitForService,
-  consumeRabbitMessage,
   connectWebSocket,
   waitForWebSocketMessage,
   closeWebSocket,
@@ -17,7 +15,7 @@ describe('Integration: Full Vote Flow', () => {
   let admin;
 
   beforeAll(async () => {
-    await waitForService('http://localhost:3000', 30, 2000);
+    await waitForService('http://localhost:3000/health', 30, 2000);
     await new Promise((r) => setTimeout(r, WAIT_FOR_STARTUP));
     admin = await createKafkaAdmin();
   }, 60000);
@@ -36,20 +34,21 @@ describe('Integration: Full Vote Flow', () => {
       const config = await admin.describeConfigs({
         resources: [{ type: 2, name: 'eligible_voters' }],
       });
-      const compactConfig = config[0].configEntries.find((c) => c.name === 'cleanup.policy');
-      expect(compactConfig.value).toBe('compact');
+      const compactConfig = config.resources[0].configEntries.find((c) => c.configName === 'cleanup.policy');
+      expect(compactConfig?.configValue).toBe('compact');
     });
 
     it('raw_votes topic exists and is compacted', async () => {
       const config = await admin.describeConfigs({
         resources: [{ type: 2, name: 'raw_votes' }],
       });
-      const compactConfig = config[0].configEntries.find((c) => c.name === 'cleanup.policy');
-      expect(compactConfig.value).toBe('compact');
+      const compactConfig = config.resources[0].configEntries.find((c) => c.configName === 'cleanup.policy');
+      expect(compactConfig?.configValue).toBe('compact');
     });
 
     it('voters are registered in eligible_voters topic', async () => {
-      const consumer = await createKafkaConsumer('test-startup-check', 'eligible_voters', true);
+      const groupId = `test-startup-${Date.now()}`;
+      const consumer = await createKafkaConsumer(groupId, 'eligible_voters', true);
       const voters = [];
 
       await consumer.run({
@@ -106,13 +105,24 @@ describe('Integration: Full Vote Flow', () => {
 
   describe('Phase 2: Vote is published to Kafka and processed', () => {
     it('vote appears in raw_votes topic', async () => {
-      const consumer = await createKafkaConsumer('test-raw-votes-check', 'raw_votes', true);
+      const testIp = '172.16.0.1';
+      const testUser = 'juan';
+
+      await submitVote({
+        user_id: testUser,
+        candidate_id: 'B',
+        region: 'Sur',
+        ip_address: testIp,
+      });
+
+      const groupId = `test-raw-votes-${Date.now()}`;
+      const consumer = await createKafkaConsumer(groupId, 'raw_votes', true);
       let foundVote = null;
 
       await consumer.run({
         eachMessage: async ({ message }) => {
           const vote = JSON.parse(message.value.toString());
-          if (vote.user_id === 'ana' && vote.candidate_id === 'A') {
+          if (vote.user_id === testUser && vote.ip_address === testIp) {
             foundVote = vote;
           }
         },
@@ -122,17 +132,28 @@ describe('Integration: Full Vote Flow', () => {
       await consumer.disconnect();
 
       expect(foundVote).not.toBeNull();
-      expect(foundVote.region).toBe('Norte');
+      expect(foundVote.region).toBe('Sur');
     });
 
     it('vote key is user_id for compaction', async () => {
-      const consumer = await createKafkaConsumer('test-key-check', 'raw_votes', true);
+      const testIp = '172.16.0.2';
+      const testUser = 'pedro';
+
+      await submitVote({
+        user_id: testUser,
+        candidate_id: 'C',
+        region: 'Este',
+        ip_address: testIp,
+      });
+
+      const groupId = `test-key-${Date.now()}`;
+      const consumer = await createKafkaConsumer(groupId, 'raw_votes', true);
       let foundKey = null;
 
       await consumer.run({
         eachMessage: async ({ message }) => {
           const vote = JSON.parse(message.value.toString());
-          if (vote.user_id === 'ana') {
+          if (vote.user_id === testUser && vote.ip_address === testIp) {
             foundKey = message.key.toString();
           }
         },
@@ -141,7 +162,7 @@ describe('Integration: Full Vote Flow', () => {
       await new Promise((r) => setTimeout(r, 5000));
       await consumer.disconnect();
 
-      expect(foundKey).toBe('ana');
+      expect(foundKey).toBe(testUser);
     });
   });
 
@@ -175,7 +196,8 @@ describe('Integration: Full Vote Flow', () => {
 
   describe('Phase 5: Analytics archiver', () => {
     it('votes are consumed by analytics archiver (check via Kafka offset)', async () => {
-      const consumer = await createKafkaConsumer('test-archiver-check', 'raw_votes', true);
+      const groupId = `test-archiver-${Date.now()}`;
+      const consumer = await createKafkaConsumer(groupId, 'raw_votes', true);
       let voteCount = 0;
 
       await consumer.run({
@@ -197,10 +219,10 @@ describe('Integration: Full Vote Flow', () => {
       const messagePromise = waitForWebSocketMessage(ws, 15000);
 
       const response = await submitVote({
-        user_id: 'juan',
+        user_id: 'lucia',
         candidate_id: 'B',
         region: 'Sur',
-        ip_address: '192.168.1.200',
+        ip_address: '172.16.0.3',
       });
       expect(response.status).toBe(200);
 

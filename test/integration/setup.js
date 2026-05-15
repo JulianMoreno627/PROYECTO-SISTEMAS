@@ -127,8 +127,8 @@ export function closeWebSocket(ws) {
 export async function waitForService(url, maxRetries = 30, delay = 2000) {
   for (let i = 0; i < maxRetries; i++) {
     try {
-      await axios.get(url, { timeout: 3000 });
-      return true;
+      const response = await axios.get(url, { timeout: 3000 });
+      if (response.status === 200) return true;
     } catch {
       await new Promise((r) => setTimeout(r, delay));
     }
