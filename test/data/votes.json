@@ -1,0 +1,7 @@
+[
+  { "user_id": "ana", "candidate_id": "A", "region": "Norte", "ip_address": "192.168.1.1" },
+  { "user_id": "juan", "candidate_id": "B", "region": "Sur", "ip_address": "192.168.1.2" },
+  { "user_id": "pedro", "candidate_id": "A", "region": "Norte", "ip_address": "192.168.1.3" },
+  { "user_id": "lucia", "candidate_id": "C", "region": "Este", "ip_address": "192.168.1.1" },
+  { "user_id": "carlos", "candidate_id": "B", "region": "Oeste", "ip_address": "192.168.1.4" }
+]

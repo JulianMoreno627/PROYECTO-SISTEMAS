@@ -10,6 +10,29 @@ const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
 const regionalCounts = {}; // region -> candidate -> count
 const userVotes = new Map(); // userId -> { region, candidate_id }
 
+function processVote(userId, region, candidateId) {
+  const prevVote = userVotes.get(userId);
+  if (prevVote) {
+    regionalCounts[prevVote.region][prevVote.candidate_id]--;
+    if (regionalCounts[prevVote.region][prevVote.candidate_id] <= 0) {
+      delete regionalCounts[prevVote.region][prevVote.candidate_id];
+    }
+    if (Object.keys(regionalCounts[prevVote.region]).length === 0) {
+      delete regionalCounts[prevVote.region];
+    }
+  }
+
+  if (!regionalCounts[region]) {
+    regionalCounts[region] = {};
+  }
+  regionalCounts[region][candidateId] = (regionalCounts[region][candidateId] || 0) + 1;
+  userVotes.set(userId, { region, candidate_id: candidateId });
+}
+
+function getRoutingKey(region) {
+  return `results.${region.toLowerCase().replace(/\s+/g, '_')}`;
+}
+
 async function run() {
   const consumer = kafka.consumer({ groupId: 'regional-rollup-processor' });
   await consumer.connect();
@@ -22,22 +45,7 @@ async function run() {
       const region = vote.region;
       const candidate = vote.candidate_id;
 
-      const prevVote = userVotes.get(userId);
-      if (prevVote) {
-        regionalCounts[prevVote.region][prevVote.candidate_id]--;
-        if (regionalCounts[prevVote.region][prevVote.candidate_id] <= 0) {
-          delete regionalCounts[prevVote.region][prevVote.candidate_id];
-        }
-        if (Object.keys(regionalCounts[prevVote.region]).length === 0) {
-          delete regionalCounts[prevVote.region];
-        }
-      }
-
-      if (!regionalCounts[region]) {
-        regionalCounts[region] = {};
-      }
-      regionalCounts[region][candidate] = (regionalCounts[region][candidate] || 0) + 1;
-      userVotes.set(userId, { region, candidate_id: candidate });
+      processVote(userId, region, candidate);
       console.log(`Updated regional counts for ${region}:`, regionalCounts[region]);
     },
   });
@@ -50,7 +58,7 @@ async function run() {
 
   setInterval(() => {
     for (const region in regionalCounts) {
-      const routingKey = `results.${region.toLowerCase().replace(/\s+/g, '_')}`;
+      const routingKey = getRoutingKey(region);
       channel.publish(exchange, routingKey, Buffer.from(JSON.stringify(regionalCounts[region])));
       console.log(`Published regional counts for ${region} to RabbitMQ Topic with key ${routingKey}`);
     }
@@ -58,3 +66,5 @@ async function run() {
 }
 
 run().catch(console.error);
+
+module.exports = { processVote, getRoutingKey, regionalCounts, userVotes };

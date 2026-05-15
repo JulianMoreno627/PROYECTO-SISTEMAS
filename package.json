@@ -4,7 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run test/unit",
+    "test:watch": "vitest test/unit",
+    "test:coverage": "vitest run test/unit --coverage",
+    "test:integration": "vitest run test/integration --testTimeout=60000 --hookTimeout=60000",
+    "test:all": "vitest run --testTimeout=60000 --hookTimeout=60000"
   },
   "keywords": [],
   "author": "",
@@ -19,5 +23,8 @@
     "nodemon": "^3.1.14",
     "uuid": "^14.0.0",
     "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
   }
 }

@@ -10,8 +10,38 @@ const ipVotersMap = new Map(); // ip -> { set: Set<userId>, firstVoteTime: Numbe
 const CLEANUP_INTERVAL_MS = 120000; // 2 minutes
 const STALE_THRESHOLD_MS = 300000; // 5 minutes
 
-function cleanupStaleIPs() {
-  const now = Date.now();
+function processVote(ipAddress, userId, timestamp) {
+  const now = timestamp || Date.now();
+
+  if (!ipVotersMap.has(ipAddress)) {
+    ipVotersMap.set(ipAddress, { set: new Set(), firstVoteTime: now, alerted: false });
+  }
+
+  const entry = ipVotersMap.get(ipAddress);
+
+  if (now - entry.firstVoteTime > 60000) {
+    entry.set.clear();
+    entry.firstVoteTime = now;
+    entry.alerted = false;
+  }
+
+  entry.set.add(userId);
+
+  if (entry.set.size > 5 && !entry.alerted) {
+    entry.alerted = true;
+    return {
+      ip: ipAddress,
+      users: Array.from(entry.set),
+      message: 'Potential bot attack detected: >5 users from same IP in 1 min',
+      timestamp: now,
+    };
+  }
+
+  return null;
+}
+
+function cleanupStaleIPs(timestamp) {
+  const now = timestamp || Date.now();
   for (const [ip, entry] of ipVotersMap) {
     if (now - entry.firstVoteTime > STALE_THRESHOLD_MS) {
       ipVotersMap.delete(ip);
@@ -30,29 +60,8 @@ async function run() {
       const vote = JSON.parse(message.value.toString());
       const now = Date.now();
 
-      if (!ipVotersMap.has(vote.ip_address)) {
-        ipVotersMap.set(vote.ip_address, { set: new Set(), firstVoteTime: now });
-      }
-
-      const entry = ipVotersMap.get(vote.ip_address);
-      
-      // Reset if more than 1 minute has passed (simple window)
-      if (now - entry.firstVoteTime > 60000) {
-        entry.set.clear();
-        entry.firstVoteTime = now;
-        entry.alerted = false;
-      }
-
-      entry.set.add(vote.user_id);
-
-      if (entry.set.size > 5 && !entry.alerted) {
-        entry.alerted = true;
-        const alert = {
-          ip: vote.ip_address,
-          users: Array.from(entry.set),
-          message: 'Potential bot attack detected: >5 users from same IP in 1 min',
-          timestamp: now
-        };
+      const alert = processVote(vote.ip_address, vote.user_id, now);
+      if (alert) {
         console.warn('ALERT:', alert.message);
         await producer.send({
           topic: 'security_alerts',
@@ -66,3 +75,5 @@ async function run() {
 }
 
 run().catch(console.error);
+
+module.exports = { processVote, cleanupStaleIPs, ipVotersMap, CLEANUP_INTERVAL_MS, STALE_THRESHOLD_MS };

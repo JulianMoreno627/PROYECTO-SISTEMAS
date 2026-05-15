@@ -10,6 +10,18 @@ const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
 const globalCounts = {};
 const userVotes = new Map(); // userId -> candidate_id
 
+function processVote(userId, candidateId) {
+  const prevCandidate = userVotes.get(userId);
+  if (prevCandidate) {
+    globalCounts[prevCandidate]--;
+    if (globalCounts[prevCandidate] <= 0) {
+      delete globalCounts[prevCandidate];
+    }
+  }
+  globalCounts[candidateId] = (globalCounts[candidateId] || 0) + 1;
+  userVotes.set(userId, candidateId);
+}
+
 async function run() {
   // Kafka Consumer
   const consumer = kafka.consumer({ groupId: 'global-vote-processor' });
@@ -22,16 +34,7 @@ async function run() {
       const userId = message.key.toString();
       const candidate = vote.candidate_id;
 
-      const prevCandidate = userVotes.get(userId);
-      if (prevCandidate) {
-        globalCounts[prevCandidate]--;
-        if (globalCounts[prevCandidate] <= 0) {
-          delete globalCounts[prevCandidate];
-        }
-      }
-
-      globalCounts[candidate] = (globalCounts[candidate] || 0) + 1;
-      userVotes.set(userId, candidate);
+      processVote(userId, candidate);
       console.log(`Updated global counts:`, globalCounts);
     },
   });
@@ -52,3 +55,5 @@ async function run() {
 }
 
 run().catch(console.error);
+
+module.exports = { processVote, globalCounts, userVotes };
