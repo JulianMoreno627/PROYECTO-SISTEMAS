@@ -9,15 +9,17 @@ app.use(bodyParser.json());
 
 const kafka = new Kafka({
   clientId: 'voting-api',
-  brokers: [process.env.KAFKA_BROKERS || 'localhost:9092']
+  brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
+  retry: { retries: 5 }
 });
-const producer = kafka.producer();
+let producer;
 const admin = kafka.admin();
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
-let amqpChannel, replyQueue;
+let amqpConnection, amqpChannel, replyQueue;
 let isReady = false;
 const pendingRPCs = new Map();
+const MAX_PENDING_RPCS = 10000;
 
 async function initKafka() {
   await admin.connect();
@@ -36,12 +38,22 @@ async function initKafka() {
     console.log('Topic raw_votes already exists');
   }
   await admin.disconnect();
+  await connectProducer();
+}
+
+async function connectProducer() {
+  producer = kafka.producer();
   await producer.connect();
+  console.log('Kafka producer connected');
 }
 
 async function initRabbit() {
-  const conn = await amqp.connect(RABBITMQ_URL);
-  amqpChannel = await conn.createChannel();
+  await connectRabbit();
+}
+
+async function connectRabbit() {
+  amqpConnection = await amqp.connect(RABBITMQ_URL);
+  amqpChannel = await amqpConnection.createChannel();
   replyQueue = await amqpChannel.assertQueue('', { exclusive: true });
 
   amqpChannel.consume(replyQueue.queue, (msg) => {
@@ -53,9 +65,46 @@ async function initRabbit() {
       pendingRPCs.delete(corrId);
     }
   }, { noAck: true });
+
+  amqpConnection.on('error', (err) => {
+    console.error('RabbitMQ connection error:', err.message);
+    reconnectRabbit();
+  });
+
+  amqpConnection.on('close', () => {
+    console.warn('RabbitMQ connection closed, reconnecting...');
+    reconnectRabbit();
+  });
+
+  console.log('RabbitMQ connected');
+}
+
+async function reconnectRabbit() {
+  pendingRPCs.forEach((_, corrId) => {
+    const resolver = pendingRPCs.get(corrId);
+    if (resolver) {
+      resolver('invalido');
+    }
+  });
+  pendingRPCs.clear();
+
+  try {
+    await connectRabbit();
+  } catch (err) {
+    console.error('RabbitMQ reconnect failed, retrying in 5s:', err.message);
+    setTimeout(reconnectRabbit, 5000);
+  }
 }
 
 async function validateUserRPC(userId) {
+  if (!amqpChannel) {
+    throw new Error('RabbitMQ not connected');
+  }
+
+  if (pendingRPCs.size >= MAX_PENDING_RPCS) {
+    throw new Error('Too many pending RPC requests');
+  }
+
   const correlationId = crypto.randomUUID();
 
   return new Promise((resolve, reject) => {
@@ -83,8 +132,17 @@ app.get('/health', (req, res) => {
 app.post('/vote', async (req, res) => {
   const { user_id, candidate_id, region, ip_address } = req.body;
 
-  if (!user_id || !candidate_id || !region || !ip_address) {
-    return res.status(400).json({ error: 'Missing fields' });
+  if (typeof user_id !== 'string' || user_id.trim() === '') {
+    return res.status(400).json({ error: 'user_id must be a non-empty string' });
+  }
+  if (typeof candidate_id !== 'string' || candidate_id.trim() === '') {
+    return res.status(400).json({ error: 'candidate_id must be a non-empty string' });
+  }
+  if (typeof region !== 'string' || region.trim() === '') {
+    return res.status(400).json({ error: 'region must be a non-empty string' });
+  }
+  if (typeof ip_address !== 'string' || ip_address.trim() === '') {
+    return res.status(400).json({ error: 'ip_address must be a non-empty string' });
   }
 
   try {
@@ -111,11 +169,36 @@ app.post('/vote', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+let server;
+
 async function start() {
   await initKafka();
   await initRabbit();
   isReady = true;
-  app.listen(PORT, () => console.log(`Voting API listening on port ${PORT}`));
+  server = app.listen(PORT, () => console.log(`Voting API listening on port ${PORT}`));
 }
+
+async function gracefulShutdown(signal) {
+  console.log(`Received ${signal}, shutting down gracefully...`);
+  isReady = false;
+  if (server) server.close();
+
+  const shutdownTasks = [];
+
+  if (producer) {
+    shutdownTasks.push(producer.disconnect().catch(err => console.error('Producer disconnect error:', err.message)));
+  }
+
+  if (amqpConnection) {
+    shutdownTasks.push(amqpConnection.close().catch(err => console.error('RabbitMQ close error:', err.message)));
+  }
+
+  await Promise.all(shutdownTasks);
+  console.log('Shutdown complete');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 start().catch(console.error);

@@ -3,17 +3,20 @@ const amqp = require('amqplib');
 
 const kafka = new Kafka({
   clientId: 'user-validation-service',
-  brokers: [process.env.KAFKA_BROKERS || 'localhost:9092']
+  brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
+  retry: { retries: 5 }
 });
 
 const validVoters = new Set();
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
+let rabbitConnection, rabbitChannel;
+let kafkaConsumer;
 
 async function run() {
   // 1. Kafka Consumer (KTable pattern)
-  const consumer = kafka.consumer({ groupId: 'user-validation-service' });
-  await consumer.connect();
-  await consumer.subscribe({ topic: 'eligible_voters', fromBeginning: true });
+  kafkaConsumer = kafka.consumer({ groupId: 'user-validation-service' });
+  await kafkaConsumer.connect();
+  await kafkaConsumer.subscribe({ topic: 'eligible_voters', fromBeginning: true });
 
   console.log('Consuming eligible_voters topic...');
 
@@ -35,7 +38,7 @@ async function run() {
     }, 1000);
   }
 
-  await consumer.run({
+  await kafkaConsumer.run({
     eachMessage: async ({ message }) => {
       const userId = message.key.toString();
       validVoters.add(userId);
@@ -52,29 +55,104 @@ async function run() {
   console.log(`Valid voters loaded: ${validVoters.size}`);
 
   // 2. RabbitMQ RPC Server
-  const connection = await amqp.connect(RABBITMQ_URL);
-  const channel = await connection.createChannel();
+  await connectRabbit();
+
+  // Handle Kafka reconnection
+  kafkaConsumer.on('consumer.crash', async (err) => {
+    console.error('Kafka consumer crashed:', err.message);
+    try {
+      kafkaConsumer = kafka.consumer({ groupId: 'user-validation-service' });
+      await kafkaConsumer.connect();
+      await kafkaConsumer.subscribe({ topic: 'eligible_voters', fromBeginning: true });
+      await kafkaConsumer.run({
+        eachMessage: async ({ message }) => {
+          const userId = message.key.toString();
+          validVoters.add(userId);
+        },
+      });
+      console.log('Kafka consumer reconnected');
+    } catch (reconnectErr) {
+      console.error('Kafka reconnect failed:', reconnectErr.message);
+    }
+  });
+}
+
+async function connectRabbit() {
+  rabbitConnection = await amqp.connect(RABBITMQ_URL);
+  rabbitChannel = await rabbitConnection.createChannel();
   const queue = 'user_validation_queue';
 
-  await channel.assertQueue(queue, { durable: false });
-  channel.prefetch(1);
+  await rabbitChannel.assertQueue(queue, { durable: false });
+  rabbitChannel.prefetch(1);
   console.log('Awaiting RPC requests on user_validation_queue');
 
-  channel.consume(queue, async (msg) => {
-    const content = JSON.parse(msg.content.toString());
+  rabbitChannel.consume(queue, async (msg) => {
+    if (!msg) return;
+    let content;
+    try {
+      content = JSON.parse(msg.content.toString());
+    } catch (err) {
+      console.error('Failed to parse RPC message:', err.message);
+      rabbitChannel.nack(msg, false, false);
+      return;
+    }
     const userId = content.user_id;
     console.log(`Received validation request for: ${userId}`);
 
     const isValid = validVoters.has(userId);
     const response = isValid ? 'valido' : 'invalido';
 
-    channel.sendToQueue(msg.properties.replyTo, Buffer.from(response), {
+    rabbitChannel.sendToQueue(msg.properties.replyTo, Buffer.from(response), {
       correlationId: msg.properties.correlationId
     });
 
-    channel.ack(msg);
+    rabbitChannel.ack(msg);
     console.log(`Sent response: ${response} for user: ${userId}`);
   });
+
+  rabbitConnection.on('error', (err) => {
+    console.error('RabbitMQ connection error:', err.message);
+    reconnectRabbit();
+  });
+
+  rabbitConnection.on('close', () => {
+    console.warn('RabbitMQ connection closed, reconnecting...');
+    reconnectRabbit();
+  });
 }
+
+async function reconnectRabbit() {
+  try {
+    await connectRabbit();
+  } catch (err) {
+    console.error('RabbitMQ reconnect failed, retrying in 5s:', err.message);
+    setTimeout(reconnectRabbit, 5000);
+  }
+}
+
+async function gracefulShutdown(signal) {
+  console.log(`Received ${signal}, shutting down gracefully...`);
+
+  const shutdownTasks = [];
+
+  if (kafkaConsumer) {
+    shutdownTasks.push(kafkaConsumer.disconnect().catch(err => console.error('Kafka disconnect error:', err.message)));
+  }
+
+  if (rabbitChannel) {
+    shutdownTasks.push(rabbitChannel.close().catch(err => console.error('RabbitMQ channel close error:', err.message)));
+  }
+
+  if (rabbitConnection) {
+    shutdownTasks.push(rabbitConnection.close().catch(err => console.error('RabbitMQ close error:', err.message)));
+  }
+
+  await Promise.all(shutdownTasks);
+  console.log('Shutdown complete');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 run().catch(console.error);
