@@ -14,18 +14,23 @@ async function run() {
   await admin.connect();
   console.log('Admin connected');
 
-  // Create compacted topic
-  await admin.createTopics({
-    topics: [{
-      topic: 'eligible_voters',
-      numPartitions: 1,
-      replicationFactor: 1,
-      configEntries: [
-        { name: 'cleanup.policy', value: 'compact' }
-      ]
-    }]
-  });
-  console.log('Topic eligible_voters created (compacted)');
+  // Create compacted topic if it doesn't exist
+  const existingTopics = await admin.listTopics();
+  if (!existingTopics.includes('eligible_voters')) {
+    await admin.createTopics({
+      topics: [{
+        topic: 'eligible_voters',
+        numPartitions: 1,
+        replicationFactor: 1,
+        configEntries: [
+          { name: 'cleanup.policy', value: 'compact' }
+        ]
+      }]
+    });
+    console.log('Topic eligible_voters created (compacted)');
+  } else {
+    console.log('Topic eligible_voters already exists');
+  }
   await admin.disconnect();
 
   await producer.connect();

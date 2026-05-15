@@ -29,11 +29,13 @@ async function run() {
       if (now - entry.firstVoteTime > 60000) {
         entry.set.clear();
         entry.firstVoteTime = now;
+        entry.alerted = false;
       }
 
       entry.set.add(vote.user_id);
 
-      if (entry.set.size > 5) {
+      if (entry.set.size > 5 && !entry.alerted) {
+        entry.alerted = true;
         const alert = {
           ip: vote.ip_address,
           users: Array.from(entry.set),
