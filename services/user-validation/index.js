@@ -11,19 +11,45 @@ const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
 
 async function run() {
   // 1. Kafka Consumer (KTable pattern)
-  const consumer = kafka.consumer({ groupId: 'user-validation-group-' + Date.now() });
+  const consumer = kafka.consumer({ groupId: 'user-validation-service' });
   await consumer.connect();
   await consumer.subscribe({ topic: 'eligible_voters', fromBeginning: true });
 
   console.log('Consuming eligible_voters topic...');
-  
+
+  let initialDrainComplete = false;
+  let drainResolve;
+  const drainPromise = new Promise((resolve) => { drainResolve = resolve; });
+
+  let idleTimer;
+  let messageCount = 0;
+
+  function resetIdleTimer() {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (!initialDrainComplete) {
+        initialDrainComplete = true;
+        console.log(`Initial drain complete. Loaded ${messageCount} voters.`);
+        drainResolve();
+      }
+    }, 1000);
+  }
+
   await consumer.run({
     eachMessage: async ({ message }) => {
       const userId = message.key.toString();
       validVoters.add(userId);
-      console.log(`Updated validVoters set. Current size: ${validVoters.size}`);
+      messageCount++;
+      resetIdleTimer();
     },
   });
+
+  // If no messages at all, resolve after 1s
+  resetIdleTimer();
+
+  // Wait for all existing messages to be consumed before starting RPC server
+  await drainPromise;
+  console.log(`Valid voters loaded: ${validVoters.size}`);
 
   // 2. RabbitMQ RPC Server
   const connection = await amqp.connect(RABBITMQ_URL);

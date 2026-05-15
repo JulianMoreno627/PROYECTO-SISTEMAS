@@ -15,7 +15,8 @@ const producer = kafka.producer();
 const admin = kafka.admin();
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
-let amqpConn, amqpChannel;
+let amqpConn, amqpChannel, replyQueue;
+const pendingRPCs = new Map();
 
 async function initKafka() {
   await admin.connect();
@@ -34,22 +35,36 @@ async function initKafka() {
 async function initRabbit() {
   amqpConn = await amqp.connect(RABBITMQ_URL);
   amqpChannel = await amqpConn.createChannel();
+  replyQueue = await amqpChannel.assertQueue('', { exclusive: true });
+
+  amqpChannel.consume(replyQueue.queue, (msg) => {
+    if (!msg) return;
+    const corrId = msg.properties.correlationId;
+    const resolver = pendingRPCs.get(corrId);
+    if (resolver) {
+      resolver(msg.content.toString());
+      pendingRPCs.delete(corrId);
+    }
+  }, { noAck: true });
 }
 
 async function validateUserRPC(userId) {
-  const q = await amqpChannel.assertQueue('', { exclusive: true });
   const correlationId = crypto.randomUUID();
 
-  return new Promise((resolve) => {
-    amqpChannel.consume(q.queue, (msg) => {
-      if (msg.properties.correlationId === correlationId) {
-        resolve(msg.content.toString());
-      }
-    }, { noAck: true });
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingRPCs.delete(correlationId);
+      reject(new Error('RPC timeout'));
+    }, 5000);
+
+    pendingRPCs.set(correlationId, (result) => {
+      clearTimeout(timeout);
+      resolve(result);
+    });
 
     amqpChannel.sendToQueue('user_validation_queue', Buffer.from(JSON.stringify({ user_id: userId })), {
-      correlationId: correlationId,
-      replyTo: q.queue
+      correlationId,
+      replyTo: replyQueue.queue
     });
   });
 }

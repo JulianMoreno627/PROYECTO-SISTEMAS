@@ -8,6 +8,7 @@ const kafka = new Kafka({
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
 const globalCounts = {};
+const userVotes = new Map(); // userId -> candidate_id
 
 async function run() {
   // Kafka Consumer
@@ -18,7 +19,19 @@ async function run() {
   await consumer.run({
     eachMessage: async ({ message }) => {
       const vote = JSON.parse(message.value.toString());
-      globalCounts[vote.candidate_id] = (globalCounts[vote.candidate_id] || 0) + 1;
+      const userId = message.key.toString();
+      const candidate = vote.candidate_id;
+
+      const prevCandidate = userVotes.get(userId);
+      if (prevCandidate) {
+        globalCounts[prevCandidate]--;
+        if (globalCounts[prevCandidate] <= 0) {
+          delete globalCounts[prevCandidate];
+        }
+      }
+
+      globalCounts[candidate] = (globalCounts[candidate] || 0) + 1;
+      userVotes.set(userId, candidate);
       console.log(`Updated global counts:`, globalCounts);
     },
   });

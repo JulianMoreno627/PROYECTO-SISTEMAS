@@ -8,6 +8,7 @@ const kafka = new Kafka({
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
 const regionalCounts = {}; // region -> candidate -> count
+const userVotes = new Map(); // userId -> { region, candidate_id }
 
 async function run() {
   const consumer = kafka.consumer({ groupId: 'regional-rollup-processor' });
@@ -17,11 +18,24 @@ async function run() {
   await consumer.run({
     eachMessage: async ({ message }) => {
       const vote = JSON.parse(message.value.toString());
-      if (!regionalCounts[vote.region]) {
-        regionalCounts[vote.region] = {};
+      const userId = message.key.toString();
+      const region = vote.region;
+      const candidate = vote.candidate_id;
+
+      const prevVote = userVotes.get(userId);
+      if (prevVote) {
+        regionalCounts[prevVote.region][prevVote.candidate_id]--;
+        if (regionalCounts[prevVote.region][prevVote.candidate_id] <= 0) {
+          delete regionalCounts[prevVote.region][prevVote.candidate_id];
+        }
       }
-      regionalCounts[vote.region][vote.candidate_id] = (regionalCounts[vote.region][vote.candidate_id] || 0) + 1;
-      console.log(`Updated regional counts for ${vote.region}:`, regionalCounts[vote.region]);
+
+      if (!regionalCounts[region]) {
+        regionalCounts[region] = {};
+      }
+      regionalCounts[region][candidate] = (regionalCounts[region][candidate] || 0) + 1;
+      userVotes.set(userId, { region, candidate_id: candidate });
+      console.log(`Updated regional counts for ${region}:`, regionalCounts[region]);
     },
   });
 
