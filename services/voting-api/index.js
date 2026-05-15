@@ -15,26 +15,32 @@ const producer = kafka.producer();
 const admin = kafka.admin();
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
-let amqpConn, amqpChannel, replyQueue;
+let amqpChannel, replyQueue;
 const pendingRPCs = new Map();
 
 async function initKafka() {
   await admin.connect();
-  await admin.createTopics({
-    topics: [{
-      topic: 'raw_votes',
-      numPartitions: 1,
-      replicationFactor: 1,
-      configEntries: [{ name: 'cleanup.policy', value: 'compact' }]
-    }]
-  });
+  const existingTopics = await admin.listTopics();
+  if (!existingTopics.includes('raw_votes')) {
+    await admin.createTopics({
+      topics: [{
+        topic: 'raw_votes',
+        numPartitions: 1,
+        replicationFactor: 1,
+        configEntries: [{ name: 'cleanup.policy', value: 'compact' }]
+      }]
+    });
+    console.log('Topic raw_votes created (compacted)');
+  } else {
+    console.log('Topic raw_votes already exists');
+  }
   await admin.disconnect();
   await producer.connect();
 }
 
 async function initRabbit() {
-  amqpConn = await amqp.connect(RABBITMQ_URL);
-  amqpChannel = await amqpConn.createChannel();
+  const conn = await amqp.connect(RABBITMQ_URL);
+  amqpChannel = await conn.createChannel();
   replyQueue = await amqpChannel.assertQueue('', { exclusive: true });
 
   amqpChannel.consume(replyQueue.queue, (msg) => {

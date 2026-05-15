@@ -6,7 +6,18 @@ const kafka = new Kafka({
 });
 
 const producer = kafka.producer();
-const ipVotersMap = new Map(); // ip -> { set: Set<userId>, timestamp: Number }
+const ipVotersMap = new Map(); // ip -> { set: Set<userId>, firstVoteTime: Number, alerted: boolean }
+const CLEANUP_INTERVAL_MS = 120000; // 2 minutes
+const STALE_THRESHOLD_MS = 300000; // 5 minutes
+
+function cleanupStaleIPs() {
+  const now = Date.now();
+  for (const [ip, entry] of ipVotersMap) {
+    if (now - entry.firstVoteTime > STALE_THRESHOLD_MS) {
+      ipVotersMap.delete(ip);
+    }
+  }
+}
 
 async function run() {
   await producer.connect();
@@ -50,6 +61,8 @@ async function run() {
       }
     },
   });
+
+  setInterval(cleanupStaleIPs, CLEANUP_INTERVAL_MS);
 }
 
 run().catch(console.error);

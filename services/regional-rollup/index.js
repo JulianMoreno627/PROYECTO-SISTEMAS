@@ -28,6 +28,9 @@ async function run() {
         if (regionalCounts[prevVote.region][prevVote.candidate_id] <= 0) {
           delete regionalCounts[prevVote.region][prevVote.candidate_id];
         }
+        if (Object.keys(regionalCounts[prevVote.region]).length === 0) {
+          delete regionalCounts[prevVote.region];
+        }
       }
 
       if (!regionalCounts[region]) {
