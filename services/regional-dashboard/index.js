@@ -96,4 +96,7 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-run().catch(console.error);
+run().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

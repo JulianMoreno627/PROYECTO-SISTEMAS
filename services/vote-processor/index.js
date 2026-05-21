@@ -1,6 +1,10 @@
 const { Kafka } = require('kafkajs');
 const amqp = require('amqplib');
 
+// vote-processor (conteo global)
+// Objetivo: consumir raw_votes (Kafka) y calcular conteo global en memoria.
+// Luego publica el resultado cada 1s a RabbitMQ en un exchange fanout (live_results_global).
+
 const kafka = new Kafka({
   clientId: 'vote-processor',
   brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
@@ -8,12 +12,17 @@ const kafka = new Kafka({
 });
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
+// Conteo por candidato: { "A": 10, "B": 7, ... }
 const globalCounts = {};
+// Estado por usuario para soportar "último voto": user_id -> candidate_id
 const userVotes = new Map();
 let kafkaConsumer, rabbitConnection, rabbitChannel;
 let publishInterval;
 
 function processVote(userId, candidateId) {
+  // Lógica stateful:
+  // - Si el usuario ya había votado, se resta su voto anterior.
+  // - Luego se suma el nuevo voto. Así el total siempre refleja el "último voto por usuario".
   const prevCandidate = userVotes.get(userId);
   if (prevCandidate) {
     globalCounts[prevCandidate]--;
@@ -26,7 +35,7 @@ function processVote(userId, candidateId) {
 }
 
 async function run() {
-  // Kafka Consumer
+  // Consumidor Kafka: lee raw_votes. La clave del mensaje (key) es el user_id.
   kafkaConsumer = kafka.consumer({ groupId: 'global-vote-processor' });
   await kafkaConsumer.connect();
   await kafkaConsumer.subscribe({ topic: 'raw_votes', fromBeginning: true });
@@ -53,7 +62,7 @@ async function run() {
     },
   });
 
-  // RabbitMQ Publisher
+  // Publicador RabbitMQ: fanout => todos los dashboards/global listeners reciben lo mismo
   await connectRabbit();
 
   publishInterval = setInterval(() => {
@@ -147,6 +156,9 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-run().catch(console.error);
+run().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
 
 module.exports = { processVote, globalCounts, userVotes };

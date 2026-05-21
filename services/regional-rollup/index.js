@@ -1,6 +1,13 @@
 const { Kafka } = require('kafkajs');
 const amqp = require('amqplib');
 
+// regional-rollup-service (conteo regional)
+// Objetivo: consumir raw_votes (Kafka) y mantener conteos por región.
+// Publica cada 5s a RabbitMQ en exchange topic (live_results_regional) usando routing keys:
+// - results.norte
+// - results.sur
+// etc.
+
 const kafka = new Kafka({
   clientId: 'regional-rollup-service',
   brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
@@ -8,12 +15,15 @@ const kafka = new Kafka({
 });
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
+// Estructura: region -> { candidate_id -> count }
 const regionalCounts = {};
+// Estado por usuario para reflejar el "último voto" (y moverlo de región/candidato si cambia)
 const userVotes = new Map();
 let kafkaConsumer, rabbitConnection, rabbitChannel;
 let publishInterval;
 
 function processVote(userId, region, candidateId) {
+  // Si el usuario ya votó antes, se descuenta su voto anterior del conteo de su región anterior.
   const prevVote = userVotes.get(userId);
   if (prevVote && regionalCounts[prevVote.region]) {
     regionalCounts[prevVote.region][prevVote.candidate_id]--;
@@ -33,10 +43,12 @@ function processVote(userId, region, candidateId) {
 }
 
 function getRoutingKey(region) {
+  // Normaliza región para la routing key (ej: "Costa Norte" -> "results.costa_norte")
   return `results.${region.toLowerCase().replace(/\s+/g, '_')}`;
 }
 
 async function run() {
+  // Consumidor independiente (groupId propio) para poder procesar el mismo flujo en paralelo
   kafkaConsumer = kafka.consumer({ groupId: 'regional-rollup-processor' });
   await kafkaConsumer.connect();
   await kafkaConsumer.subscribe({ topic: 'raw_votes', fromBeginning: true });
@@ -70,6 +82,7 @@ async function run() {
     if (Object.keys(regionalCounts).length > 0 && rabbitChannel) {
       for (const region in regionalCounts) {
         const routingKey = getRoutingKey(region);
+        // Topic exchange: la routing key decide qué consumidores reciben cada mensaje
         rabbitChannel.publish('live_results_regional', routingKey, Buffer.from(JSON.stringify(regionalCounts[region])));
         console.log(`Published regional counts for ${region} to RabbitMQ Topic with key ${routingKey}`);
       }
@@ -161,6 +174,9 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-run().catch(console.error);
+run().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
 
 module.exports = { processVote, getRoutingKey, regionalCounts, userVotes };

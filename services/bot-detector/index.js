@@ -1,5 +1,7 @@
 const { Kafka } = require('kafkajs');
 
+// Detecta votos tipo bot: >5 usuarios distintos desde la misma IP en 1 minuto, y emite una alerta en Kafka.
+
 const kafka = new Kafka({
   clientId: 'bot-detector-service',
   brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
@@ -7,20 +9,45 @@ const kafka = new Kafka({
 });
 
 let producer, kafkaConsumer;
+// Estado en memoria: ip -> { set(user_id), firstVoteTime, alerted }
 const ipVotersMap = new Map();
-const CLEANUP_INTERVAL_MS = 120000;
-const STALE_THRESHOLD_MS = 300000;
+const CLEANUP_INTERVAL_MS = 120000; 
+const STALE_THRESHOLD_MS = 300000; 
 let cleanupInterval;
+
+async function ensureTopics() {
+  // Asegura que exista el topic de alertas.
+  const admin = kafka.admin();
+  await admin.connect();
+  const existingTopics = await admin.listTopics();
+  if (!existingTopics.includes('security_alerts')) {
+    await admin.createTopics({
+      topics: [
+        {
+          topic: 'security_alerts',
+          numPartitions: 1,
+          replicationFactor: 1,
+        }
+      ]
+    });
+    console.log('Topic security_alerts created');
+  } else {
+    console.log('Topic security_alerts already exists');
+  }
+  await admin.disconnect();
+}
 
 function processVote(ipAddress, userId, timestamp) {
   const now = timestamp || Date.now();
 
+  // Guarda usuarios distintos por IP dentro de una ventana de 1 minuto.
   if (!ipVotersMap.has(ipAddress)) {
     ipVotersMap.set(ipAddress, { set: new Set(), firstVoteTime: now, alerted: false });
   }
 
   const entry = ipVotersMap.get(ipAddress);
 
+  // Reinicia la ventana después de 1 minuto.
   if (now - entry.firstVoteTime > 60000) {
     entry.set.clear();
     entry.firstVoteTime = now;
@@ -43,6 +70,7 @@ function processVote(ipAddress, userId, timestamp) {
 }
 
 function cleanupStaleIPs(timestamp) {
+  // Limpieza para evitar crecimiento infinito en memoria.
   const now = timestamp || Date.now();
   for (const [ip, entry] of ipVotersMap) {
     if (now - entry.firstVoteTime > STALE_THRESHOLD_MS) {
@@ -52,9 +80,13 @@ function cleanupStaleIPs(timestamp) {
 }
 
 async function run() {
+  await ensureTopics();
+
+  // Productor: publica alertas en Kafka.
   producer = kafka.producer();
   await producer.connect();
 
+  // Consumidor: lee votos desde Kafka para detectar patrones.
   kafkaConsumer = kafka.consumer({ groupId: 'bot-detector-group' });
   await kafkaConsumer.connect();
   await kafkaConsumer.subscribe({ topic: 'raw_votes', fromBeginning: true });
@@ -75,6 +107,7 @@ async function run() {
         return;
       }
 
+      // Si se dispara, publica un evento de alerta.
       const alert = processVote(vote.ip_address, vote.user_id, now);
       if (alert) {
         console.warn('ALERT:', alert.message);
@@ -156,6 +189,9 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-run().catch(console.error);
+run().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
 
 module.exports = { processVote, cleanupStaleIPs, ipVotersMap, CLEANUP_INTERVAL_MS, STALE_THRESHOLD_MS };

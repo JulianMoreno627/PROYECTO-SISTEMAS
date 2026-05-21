@@ -1,8 +1,10 @@
 version: '3.8'
 
-services:
+services: 
+  # Infraestructura (mensajería y log distribuido)
   kafka:
-    image: confluentinc/cp-kafka:7.5.0
+    # Kafka en modo KRaft (sin ZooKeeper) 
+    image: confluentinc/cp-kafka:7.5.0 
     hostname: kafka
     container_name: kafka
     ports:
@@ -17,12 +19,16 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Habilita el "log compaction" para poder usar topics compactados (KTable pattern)
       KAFKA_LOG_CLEANER_ENABLE: "true"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
 
   rabbitmq:
+    # RabbitMQ con panel de administración:
+    # - 5672: AMQP para los microservicios
+    # - 15672: UI web (guest/guest)
     image: rabbitmq:3-management
     ports:
       - "5672:5672"
@@ -32,6 +38,7 @@ services:
       RABBITMQ_DEFAULT_PASS: guest
 
   voter_registration:
+    # Servicio de arranque: publica votantes elegibles en Kafka (eligible_voters, compactado)
     build: .
     command: node services/voter-registration/index.js
     restart: on-failure
@@ -41,6 +48,7 @@ services:
       KAFKA_BROKERS: kafka:29092
 
   user_validation:
+    # Híbrido: construye en memoria un Set con eligible_voters (Kafka) y atiende RPC por RabbitMQ
     build: .
     command: node services/user-validation/index.js
     restart: on-failure
@@ -52,6 +60,7 @@ services:
       RABBITMQ_URL: amqp://rabbitmq
 
   voting_api:
+    # Gateway HTTP: valida por RPC (RabbitMQ) y publica votos en Kafka (raw_votes, compactado por user_id)
     build: .
     command: node services/voting-api/index.js
     restart: on-failure
@@ -65,6 +74,7 @@ services:
       RABBITMQ_URL: amqp://rabbitmq
 
   vote_processor:
+    # Procesador stateful: consume raw_votes y publica conteo global a RabbitMQ (fanout)
     build: .
     command: node services/vote-processor/index.js
     restart: on-failure
@@ -76,6 +86,7 @@ services:
       RABBITMQ_URL: amqp://rabbitmq
 
   regional_rollup:
+    # Procesador stateful: consume raw_votes y publica conteos por región a RabbitMQ (topic)
     build: .
     command: node services/regional-rollup/index.js
     restart: on-failure
@@ -87,6 +98,7 @@ services:
       RABBITMQ_URL: amqp://rabbitmq
 
   bot_detector:
+    # Anti-fraude: detecta >5 user_id desde la misma IP en 1 minuto y publica alerta en Kafka (security_alerts)
     build: .
     command: node services/bot-detector/index.js
     restart: on-failure
@@ -96,6 +108,7 @@ services:
       KAFKA_BROKERS: kafka:29092
 
   analytics_archiver:
+    # Auditoría: consume raw_votes e imprime cada voto (simulación de archivado)
     build: .
     command: node services/analytics-archiver/index.js
     restart: on-failure
@@ -105,6 +118,7 @@ services:
       KAFKA_BROKERS: kafka:29092
 
   global_dashboard:
+    # UI Global: consume fanout live_results_global y lo empuja a navegadores vía WebSocket
     build: .
     command: node services/global-dashboard/index.js
     restart: on-failure
@@ -116,6 +130,7 @@ services:
       RABBITMQ_URL: amqp://rabbitmq
 
   regional_dashboard:
+    # UI Regional: consume topic live_results_regional (results.*) y lo empuja a navegadores vía WebSocket
     build: .
     command: node services/regional-dashboard/index.js
     restart: on-failure

@@ -7,7 +7,7 @@
     "test": "vitest run test/unit",
     "test:watch": "vitest test/unit",
     "test:coverage": "vitest run test/unit --coverage",
-    "test:integration": "vitest run test/integration --testTimeout=60000 --hookTimeout=60000",
+    "test:integration": "vitest run test/integration --testTimeout=60000 --hookTimeout=60000 --no-file-parallelism",
     "test:all": "vitest run --testTimeout=60000 --hookTimeout=60000"
   },
   "keywords": [],
