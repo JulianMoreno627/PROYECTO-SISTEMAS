@@ -54,6 +54,20 @@
         const activityLog = document.getElementById('activityLog');
         const MAX_LOG = 20;
 
+        function renderActivity(history) {
+            if (!history || history.length === 0) {
+                activityLog.innerHTML = '<p style="color:#94a3b8">Sin actividad aún...</p>';
+                return;
+            }
+            activityLog.innerHTML = history.slice(0, 5).map(entry => {
+                const time = new Date(entry.timestamp).toLocaleTimeString();
+                if (entry.prevCandidate) {
+                    return `<p class="change">[${time}] ↺ ${entry.userId} cambió de ${entry.prevCandidate} → ${entry.candidate}</p>`;
+                }
+                return `<p class="first">[${time}] • ${entry.userId} votó por ${entry.candidate} (1° voto)</p>`;
+            }).join('');
+        }
+
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
             if (!data.counts) return;
@@ -77,6 +91,8 @@
                     ${voterHTML}
                 </div>`;
             }).join('');
+
+            renderActivity(data.history);
         };
     </script>
 </body>

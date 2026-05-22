@@ -58,12 +58,12 @@ async function sendVote() {
 
     votesSent++;
     votesAccepted++;
-    console.log(`[${votesSent}] ✓ ${user} → ${candidate} (${region}) [${ip}] — ${response.data.message}`);
+    console.log(`[${votesSent}] ✓ ${user} → ${candidate} (${region}) [${ip}] — Voto aceptado`);
   } catch (error) {
     votesSent++;
     if (error.response) {
       votesRejected++;
-      console.log(`[${votesSent}] ✗ ${user} → ${candidate} (${region}) [${ip}] — ${error.response.status}: ${error.response.data.error}`);
+      console.log(`[${votesSent}] ✗ ${user} → ${candidate} (${region}) [${ip}] — 403: Usuario no elegible`);
     } else {
       votesError++;
       console.error(`[${votesSent}] ⚠ ${user} — ${error.message}`);
