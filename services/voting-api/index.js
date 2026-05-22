@@ -4,19 +4,13 @@ const { Kafka } = require('kafkajs');
 const amqp = require('amqplib');
 const crypto = require('crypto');
 
-// voting-api
-// Objetivo: endpoint público HTTP POST /vote.
-// Flujo:
-// 1) Valida síncronamente por RPC (RabbitMQ) si user_id es elegible.
-// 2) Si es válido, publica el voto en Kafka en raw_votes usando clave=user_id (deduplicación/último voto).
-
 const app = express();
 app.use(bodyParser.json());
 
 const kafka = new Kafka({
   clientId: 'voting-api',
   brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
-  retry: { retries: 5 }
+  retry: { retries: 3 }
 });
 let producer;
 const admin = kafka.admin();
@@ -24,50 +18,72 @@ const admin = kafka.admin();
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
 let amqpConnection, amqpChannel, replyQueue;
 let isReady = false;
-// correlationId -> resolver de la promesa RPC (para saber qué respuesta corresponde a qué solicitud)
 const pendingRPCs = new Map();
 const MAX_PENDING_RPCS = 10000;
 
-async function initKafka() {
-  // raw_votes es topic compactado: para un mismo user_id se mantiene el último voto (key=user_id)
-  await admin.connect();
-  const existingTopics = await admin.listTopics();
-  if (!existingTopics.includes('raw_votes')) {
-    await admin.createTopics({
-      topics: [{
-        topic: 'raw_votes',
-        numPartitions: 1,
-        replicationFactor: 1,
-        configEntries: [{ name: 'cleanup.policy', value: 'compact' }]
-      }]
-    });
-    console.log('Topic raw_votes created (compacted)');
-  } else {
-    console.log('Topic raw_votes already exists');
+async function connectWithRetry(fn, label, delay = 3000) {
+  while (true) {
+    try {
+      await fn();
+      console.log(`${label} connected`);
+      return;
+    } catch (err) {
+      console.error(`${label} failed: ${err.message}. Retrying in ${delay}ms...`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
   }
-
-  const config = await admin.describeConfigs({
-    resources: [{ type: 2, name: 'raw_votes' }],
-  });
-  const cleanupPolicy = config.resources[0].configEntries.find((c) => c.configName === 'cleanup.policy')?.configValue;
-  if (cleanupPolicy !== 'compact') {
-    await admin.alterConfigs({
-      validateOnly: false,
-      resources: [
-        { type: 2, name: 'raw_votes', configEntries: [{ name: 'cleanup.policy', value: 'compact' }] },
-      ],
-    });
-    console.log('Topic raw_votes updated to compact cleanup policy');
-  }
-  await admin.disconnect();
-  await connectProducer();
 }
 
-async function connectProducer() {
-  // Productor para publicar votos en Kafka
-  producer = kafka.producer();
-  await producer.connect();
-  console.log('Kafka producer connected');
+async function initKafka() {
+  await connectWithRetry(async () => admin.connect(), 'Kafka admin');
+
+  let existingTopics;
+  try {
+    existingTopics = await admin.listTopics();
+  } catch {
+    existingTopics = [];
+  }
+
+  if (!existingTopics.includes('raw_votes')) {
+    try {
+      await admin.createTopics({
+        topics: [{
+          topic: 'raw_votes',
+          numPartitions: 1,
+          replicationFactor: 1,
+          configEntries: [{ name: 'cleanup.policy', value: 'compact' }]
+        }]
+      });
+      console.log('Topic raw_votes created (compacted)');
+    } catch (err) {
+      console.log('Topic raw_votes may already exist:', err.message);
+    }
+  }
+
+  try {
+    const config = await admin.describeConfigs({
+      resources: [{ type: 2, name: 'raw_votes' }],
+    });
+    const cleanupPolicy = config.resources[0].configEntries.find((c) => c.configName === 'cleanup.policy')?.configValue;
+    console.log(`raw_votes cleanup policy: ${cleanupPolicy}`);
+    if (cleanupPolicy && cleanupPolicy !== 'compact') {
+      await admin.alterConfigs({
+        validateOnly: false,
+        resources: [
+          { type: 2, name: 'raw_votes', configEntries: [{ name: 'cleanup.policy', value: 'compact' }] },
+        ],
+      });
+      console.log('Topic raw_votes updated to compact cleanup policy');
+    }
+  } catch (err) {
+    console.log('Could not check/alter raw_votes config:', err.message);
+  }
+
+  await admin.disconnect().catch(() => {});
+  await connectWithRetry(async () => {
+    producer = kafka.producer();
+    await producer.connect();
+  }, 'Kafka producer');
 }
 
 async function initRabbit() {
@@ -75,14 +91,12 @@ async function initRabbit() {
 }
 
 async function connectRabbit() {
-  // Conexión AMQP y cola de respuesta exclusiva para RPC (solicitud/respuesta)
   amqpConnection = await amqp.connect(RABBITMQ_URL);
   amqpChannel = await amqpConnection.createChannel();
   replyQueue = await amqpChannel.assertQueue('', { exclusive: true });
 
   amqpChannel.consume(replyQueue.queue, (msg) => {
     if (!msg) return;
-    // correlationId identifica qué solicitud está respondiendo el servidor RPC
     const corrId = msg.properties.correlationId;
     const resolver = pendingRPCs.get(corrId);
     if (resolver) {
@@ -100,38 +114,21 @@ async function connectRabbit() {
     console.warn('RabbitMQ connection closed, reconnecting...');
     reconnectRabbit();
   });
-
-  console.log('RabbitMQ connected');
 }
 
 async function reconnectRabbit() {
   pendingRPCs.forEach((_, corrId) => {
     const resolver = pendingRPCs.get(corrId);
-    if (resolver) {
-      resolver('invalido');
-    }
+    if (resolver) resolver('invalido');
   });
   pendingRPCs.clear();
 
-  try {
-    await connectRabbit();
-  } catch (err) {
-    console.error('RabbitMQ reconnect failed, retrying in 5s:', err.message);
-    setTimeout(reconnectRabbit, 5000);
-  }
+  await connectWithRetry(connectRabbit, 'RabbitMQ reconnect', 5000);
 }
 
 async function validateUserRPC(userId) {
-  // Cliente RPC:
-  // - Envía solicitud a "user_validation_queue"
-  // - Espera respuesta en replyQueue usando correlationId
-  if (!amqpChannel) {
-    throw new Error('RabbitMQ not connected');
-  }
-
-  if (pendingRPCs.size >= MAX_PENDING_RPCS) {
-    throw new Error('Too many pending RPC requests');
-  }
+  if (!amqpChannel) throw new Error('RabbitMQ not connected');
+  if (pendingRPCs.size >= MAX_PENDING_RPCS) throw new Error('Too many pending RPC requests');
 
   const correlationId = crypto.randomUUID();
 
@@ -146,7 +143,6 @@ async function validateUserRPC(userId) {
       resolve(result);
     });
 
-    // Publica la solicitud RPC (user_id) y dice dónde responder (replyTo)
     amqpChannel.sendToQueue('user_validation_queue', Buffer.from(JSON.stringify({ user_id: userId })), {
       correlationId,
       replyTo: replyQueue.queue
@@ -161,7 +157,6 @@ app.get('/health', (req, res) => {
 app.post('/vote', async (req, res) => {
   const { user_id, candidate_id, region, ip_address } = req.body;
 
-  // Validación básica de entrada para no meter basura al sistema distribuido
   if (typeof user_id !== 'string' || user_id.trim() === '') {
     return res.status(400).json({ error: 'user_id must be a non-empty string' });
   }
@@ -181,7 +176,6 @@ app.post('/vote', async (req, res) => {
 
     if (validationStatus === 'valido') {
       console.log(`User ${user_id} is valid. Publishing vote to Kafka...`);
-      // key=user_id => deduplicación por negocio (último voto por usuario)
       await producer.send({
         topic: 'raw_votes',
         messages: [
@@ -203,7 +197,6 @@ const PORT = process.env.PORT || 3000;
 let server;
 
 async function start() {
-  // Arranque: primero Kafka (topics/producer), luego Rabbit (RPC), luego HTTP
   await initKafka();
   await initRabbit();
   isReady = true;
@@ -216,14 +209,8 @@ async function gracefulShutdown(signal) {
   if (server) server.close();
 
   const shutdownTasks = [];
-
-  if (producer) {
-    shutdownTasks.push(producer.disconnect().catch(err => console.error('Producer disconnect error:', err.message)));
-  }
-
-  if (amqpConnection) {
-    shutdownTasks.push(amqpConnection.close().catch(err => console.error('RabbitMQ close error:', err.message)));
-  }
+  if (producer) shutdownTasks.push(producer.disconnect().catch(() => {}));
+  if (amqpConnection) shutdownTasks.push(amqpConnection.close().catch(() => {}));
 
   await Promise.all(shutdownTasks);
   console.log('Shutdown complete');
@@ -234,6 +221,6 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 start().catch((err) => {
-  console.error(err);
+  console.error('Fatal startup error:', err);
   process.exit(1);
 });

@@ -3,50 +3,109 @@
 <head>
     <title>Regional Voting Dashboard</title>
     <style>
-        body { font-family: sans-serif; text-align: center; }
-        .region-section { border: 2px solid #333; margin: 20px; padding: 15px; border-radius: 10px; }
-        .results-flex { display: flex; justify-content: center; gap: 10px; }
-        .candidate { border: 1px solid #ccc; padding: 10px; border-radius: 5px; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; color: #1e293b; min-height: 100vh; padding: 20px; }
+        h1 { text-align: center; font-size: 1.8em; font-weight: 600; margin-bottom: 4px; }
+        .subtitle { text-align: center; color: #64748b; font-size: 0.9em; margin-bottom: 24px; }
+        .regions { display: flex; flex-direction: column; gap: 20px; max-width: 900px; margin: 0 auto; }
+        .region-section { background: white; border-radius: 12px; padding: 16px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border-top: 4px solid #6366f1; }
+        .region-section h2 { font-size: 1.1em; font-weight: 600; color: #4338ca; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+        .cards { display: flex; gap: 14px; flex-wrap: wrap; }
+        .card { border-radius: 10px; padding: 14px 16px; min-width: 150px; flex: 1; max-width: 260px; border-left: 4px solid; }
+        .card-A { border-color: #3b82f6; background: #eff6ff; }
+        .card-B { border-color: #10b981; background: #ecfdf5; }
+        .card-C { border-color: #f59e0b; background: #fffbeb; }
+        .card h3 { font-size: 0.9em; font-weight: 600; letter-spacing: 0.5px; margin-bottom: 2px; }
+        .card-A h3 { color: #1d4ed8; }
+        .card-B h3 { color: #047857; }
+        .card-C h3 { color: #b45309; }
+        .count { font-size: 2em; font-weight: 700; margin: 2px 0 8px; }
+        .card-A .count { color: #2563eb; }
+        .card-B .count { color: #059669; }
+        .card-C .count { color: #d97706; }
+        .voters-title { font-size: 0.7em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; margin-bottom: 4px; }
+        .voter-list { list-style: none; font-size: 0.82em; }
+        .voter-list li { padding: 2px 0; }
+        .voter-list li::before { content: "•"; margin-right: 5px; }
+        .voter-changed { font-style: italic; opacity: 0.8; }
+        .voter-changed::before { content: "↺ " !important; margin-right: 3px; }
+        .empty-state { color: #94a3b8; font-size: 0.78em; font-style: italic; }
+        .empty-region { text-align: center; color: #94a3b8; font-size: 0.9em; padding: 20px; }
     </style>
 </head>
 <body>
     <h1>Resultados Regionales en Vivo</h1>
-    <div id="regions-container">
-        <p>Esperando datos regionales...</p>
+    <p class="subtitle" id="subtitle">Esperando datos regionales...</p>
+    <div class="regions" id="regions">
+        <p class="empty-region">Esperando datos...</p>
     </div>
 
     <script>
         const ws = new WebSocket(`ws://${window.location.host}`);
-        const container = document.getElementById('regions-container');
-        const regionalData = {}; // region -> results
+        const regionsContainer = document.getElementById('regions');
+        const subtitle = document.getElementById('subtitle');
+        const regionalData = {};
+
+        function updateRegions() {
+            const regionNames = Object.keys(regionalData).sort();
+            if (regionNames.length === 0) {
+                regionsContainer.innerHTML = '<p class="empty-region">Esperando datos...</p>';
+                subtitle.textContent = 'Esperando datos regionales...';
+                return;
+            }
+
+            let totalVotes = 0;
+            let html = '';
+            for (const region of regionNames) {
+                const data = regionalData[region];
+                const counts = data.counts || {};
+                const voters = data.voters || {};
+                const changes = data.changes || {};
+                let regionTotal = 0;
+
+                let cardsHtml = '';
+                const candidates = Object.keys(counts).sort();
+                for (const candidate of candidates) {
+                    const count = counts[candidate];
+                    regionTotal += count;
+                    const voterList = (voters[candidate] || []);
+                    let voterItems = '';
+                    if (voterList.length === 0) {
+                        voterItems = '<span class="empty-state">Sin votos</span>';
+                    } else {
+                        voterItems = '<ul class="voter-list">' +
+                            voterList.map(u => {
+                                const changed = changes[u];
+                                return `<li class="${changed ? 'voter-changed' : ''}">${u} ${changed ? '(cambio de voto)' : '(1° voto)'}</li>`;
+                            }).join('') +
+                            '</ul>';
+                    }
+                    cardsHtml += `
+                        <div class="card card-${candidate}">
+                            <h3>Candidato ${candidate}</h3>
+                            <div class="count">${count}</div>
+                            <div class="voters-title">Votantes</div>
+                            ${voterItems}
+                        </div>
+                    `;
+                }
+                totalVotes += regionTotal;
+                html += `
+                    <div class="region-section">
+                        <h2>${region.toUpperCase()} — ${regionTotal} votos</h2>
+                        <div class="cards">${cardsHtml}</div>
+                    </div>
+                `;
+            }
+            regionsContainer.innerHTML = html;
+            subtitle.textContent = `Última actualización: ${new Date().toLocaleTimeString()} — Total: ${totalVotes} votos`;
+        }
 
         ws.onmessage = (event) => {
             const { region, results } = JSON.parse(event.data);
             regionalData[region] = results;
-            render();
+            updateRegions();
         };
-
-        function render() {
-            container.innerHTML = '';
-            for (const region in regionalData) {
-                const section = document.createElement('div');
-                section.className = 'region-section';
-                section.innerHTML = `<h2>Región: ${region.toUpperCase()}</h2>`;
-                
-                const flex = document.createElement('div');
-                flex.className = 'results-flex';
-                
-                for (const candidate in regionalData[region]) {
-                    const div = document.createElement('div');
-                    div.className = 'candidate';
-                    div.innerHTML = `<strong>${candidate}</strong>: ${regionalData[region][candidate]}`;
-                    flex.appendChild(div);
-                }
-                
-                section.appendChild(flex);
-                container.appendChild(section);
-            }
-        }
     </script>
 </body>
 </html>

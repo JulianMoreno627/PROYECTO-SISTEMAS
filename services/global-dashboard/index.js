@@ -11,12 +11,21 @@ const wss = new WebSocket.Server({ server });
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
 let rabbitConnection, rabbitChannel;
 
+async function connectWithRetry(fn, label, delay = 3000) {
+  while (true) {
+    try { await fn(); console.log(`${label} connected`); return; }
+    catch (err) { console.error(`${label} failed: ${err.message}. Retrying in ${delay}ms...`); await new Promise((r) => setTimeout(r, delay)); }
+  }
+}
+
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 async function run() {
-  await connectRabbit();
+  await connectWithRetry(connectRabbit, 'RabbitMQ');
+  const PORT = process.env.PORT || 4000;
+  server.listen(PORT, () => console.log(`Global Dashboard running on http://localhost:${PORT}`));
 }
 
 async function connectRabbit() {
@@ -31,68 +40,31 @@ async function connectRabbit() {
   rabbitChannel.consume(q.queue, (msg) => {
     if (!msg) return;
     const data = msg.content.toString();
-    try {
-      JSON.parse(data);
-    } catch (err) {
-      console.error('Failed to parse global update:', err.message);
-      return;
-    }
-    console.log('Received global update, broadcasting to clients');
+    try { JSON.parse(data); }
+    catch (err) { console.error('Failed to parse global update:', err.message); return; }
     wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(data);
-      }
+      if (client.readyState === WebSocket.OPEN) client.send(data);
     });
   }, { noAck: true });
 
-  rabbitConnection.on('error', (err) => {
-    console.error('RabbitMQ connection error:', err.message);
-    reconnectRabbit();
-  });
-
-  rabbitConnection.on('close', () => {
-    console.warn('RabbitMQ connection closed, reconnecting...');
-    reconnectRabbit();
-  });
-
-  const PORT = process.env.PORT || 4000;
-  server.listen(PORT, () => console.log(`Global Dashboard running on http://localhost:${PORT}`));
+  rabbitConnection.on('error', (err) => { console.error('RabbitMQ error:', err.message); reconnectRabbit(); });
+  rabbitConnection.on('close', () => { console.warn('RabbitMQ closed, reconnecting...'); reconnectRabbit(); });
 }
 
-async function reconnectRabbit() {
-  try {
-    await connectRabbit();
-  } catch (err) {
-    console.error('RabbitMQ reconnect failed, retrying in 5s:', err.message);
-    setTimeout(reconnectRabbit, 5000);
-  }
-}
+async function reconnectRabbit() { await connectWithRetry(connectRabbit, 'RabbitMQ reconnect', 5000); }
 
 async function gracefulShutdown(signal) {
-  console.log(`Received ${signal}, shutting down gracefully...`);
-
-  const shutdownTasks = [];
-
-  if (rabbitChannel) {
-    shutdownTasks.push(rabbitChannel.close().catch(err => console.error('RabbitMQ channel close error:', err.message)));
-  }
-
-  if (rabbitConnection) {
-    shutdownTasks.push(rabbitConnection.close().catch(err => console.error('RabbitMQ close error:', err.message)));
-  }
-
+  console.log(`Received ${signal}, shutting down...`);
+  const tasks = [];
+  if (rabbitChannel) tasks.push(rabbitChannel.close().catch(() => {}));
+  if (rabbitConnection) tasks.push(rabbitConnection.close().catch(() => {}));
   wss.clients.forEach(client => client.close());
-
-  await Promise.all(shutdownTasks);
+  await Promise.all(tasks);
   server.close();
-  console.log('Shutdown complete');
   process.exit(0);
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+run().catch(console.error);

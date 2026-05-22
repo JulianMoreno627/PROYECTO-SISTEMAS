@@ -1,61 +1,36 @@
 const { Kafka } = require('kafkajs');
 
-// Detecta votos tipo bot: >5 usuarios distintos desde la misma IP en 1 minuto, y emite una alerta en Kafka.
-
 const kafka = new Kafka({
   clientId: 'bot-detector-service',
   brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
-  retry: { retries: 5 }
+  retry: { retries: 3 }
 });
 
 let producer, kafkaConsumer;
-// Estado en memoria: ip -> { set(user_id), firstVoteTime, alerted }
 const ipVotersMap = new Map();
-const CLEANUP_INTERVAL_MS = 120000; 
-const STALE_THRESHOLD_MS = 300000; 
+const CLEANUP_INTERVAL_MS = 120000;
+const STALE_THRESHOLD_MS = 300000;
 let cleanupInterval;
 
-async function ensureTopics() {
-  // Asegura que exista el topic de alertas.
-  const admin = kafka.admin();
-  await admin.connect();
-  const existingTopics = await admin.listTopics();
-  if (!existingTopics.includes('security_alerts')) {
-    await admin.createTopics({
-      topics: [
-        {
-          topic: 'security_alerts',
-          numPartitions: 1,
-          replicationFactor: 1,
-        }
-      ]
-    });
-    console.log('Topic security_alerts created');
-  } else {
-    console.log('Topic security_alerts already exists');
+async function connectWithRetry(fn, label, delay = 3000) {
+  while (true) {
+    try { await fn(); console.log(`${label} connected`); return; }
+    catch (err) { console.error(`${label} failed: ${err.message}. Retrying in ${delay}ms...`); await new Promise((r) => setTimeout(r, delay)); }
   }
-  await admin.disconnect();
 }
 
 function processVote(ipAddress, userId, timestamp) {
   const now = timestamp || Date.now();
-
-  // Guarda usuarios distintos por IP dentro de una ventana de 1 minuto.
   if (!ipVotersMap.has(ipAddress)) {
     ipVotersMap.set(ipAddress, { set: new Set(), firstVoteTime: now, alerted: false });
   }
-
   const entry = ipVotersMap.get(ipAddress);
-
-  // Reinicia la ventana después de 1 minuto.
   if (now - entry.firstVoteTime > 60000) {
     entry.set.clear();
     entry.firstVoteTime = now;
     entry.alerted = false;
   }
-
   entry.set.add(userId);
-
   if (entry.set.size > 5 && !entry.alerted) {
     entry.alerted = true;
     return {
@@ -65,56 +40,50 @@ function processVote(ipAddress, userId, timestamp) {
       timestamp: now,
     };
   }
-
   return null;
 }
 
 function cleanupStaleIPs(timestamp) {
-  // Limpieza para evitar crecimiento infinito en memoria.
   const now = timestamp || Date.now();
   for (const [ip, entry] of ipVotersMap) {
-    if (now - entry.firstVoteTime > STALE_THRESHOLD_MS) {
-      ipVotersMap.delete(ip);
-    }
+    if (now - entry.firstVoteTime > STALE_THRESHOLD_MS) ipVotersMap.delete(ip);
   }
 }
 
 async function run() {
-  await ensureTopics();
+  const admin = kafka.admin();
+  await connectWithRetry(() => admin.connect(), 'Kafka admin');
 
-  // Productor: publica alertas en Kafka.
+  try {
+    const existingTopics = await admin.listTopics();
+    if (!existingTopics.includes('security_alerts')) {
+      await admin.createTopics({
+        topics: [{ topic: 'security_alerts', numPartitions: 1, replicationFactor: 1 }]
+      });
+      console.log('Topic security_alerts created');
+    }
+  } catch (err) {
+    console.log('Topic security_alerts may already exist:', err.message);
+  }
+  await admin.disconnect().catch(() => {});
+
   producer = kafka.producer();
-  await producer.connect();
+  await connectWithRetry(() => producer.connect(), 'Kafka producer');
 
-  // Consumidor: lee votos desde Kafka para detectar patrones.
   kafkaConsumer = kafka.consumer({ groupId: 'bot-detector-group' });
-  await kafkaConsumer.connect();
+  await connectWithRetry(() => kafkaConsumer.connect(), 'Kafka consumer');
   await kafkaConsumer.subscribe({ topic: 'raw_votes', fromBeginning: true });
 
   await kafkaConsumer.run({
     eachMessage: async ({ message }) => {
       let vote;
-      try {
-        vote = JSON.parse(message.value.toString());
-      } catch (err) {
-        console.error('Failed to parse vote message:', err.message);
-        return;
-      }
-      const now = Date.now();
-
-      if (!vote.ip_address || !vote.user_id) {
-        console.error('Vote message missing required fields');
-        return;
-      }
-
-      // Si se dispara, publica un evento de alerta.
-      const alert = processVote(vote.ip_address, vote.user_id, now);
+      try { vote = JSON.parse(message.value.toString()); }
+      catch (err) { console.error('Failed to parse vote message:', err.message); return; }
+      if (!vote.ip_address || !vote.user_id) { console.error('Vote message missing required fields'); return; }
+      const alert = processVote(vote.ip_address, vote.user_id, Date.now());
       if (alert) {
         console.warn('ALERT:', alert.message);
-        await producer.send({
-          topic: 'security_alerts',
-          messages: [{ value: JSON.stringify(alert) }]
-        });
+        await producer.send({ topic: 'security_alerts', messages: [{ value: JSON.stringify(alert) }] });
       }
     },
   });
@@ -130,29 +99,18 @@ async function run() {
       await kafkaConsumer.run({
         eachMessage: async ({ message }) => {
           let vote;
-          try {
-            vote = JSON.parse(message.value.toString());
-          } catch (parseErr) {
-            console.error('Failed to parse vote message:', parseErr.message);
-            return;
-          }
-          const now = Date.now();
+          try { vote = JSON.parse(message.value.toString()); } catch { return; }
           if (vote.ip_address && vote.user_id) {
-            const alert = processVote(vote.ip_address, vote.user_id, now);
+            const alert = processVote(vote.ip_address, vote.user_id, Date.now());
             if (alert) {
               console.warn('ALERT:', alert.message);
-              await producer.send({
-                topic: 'security_alerts',
-                messages: [{ value: JSON.stringify(alert) }]
-              });
+              await producer.send({ topic: 'security_alerts', messages: [{ value: JSON.stringify(alert) }] });
             }
           }
         },
       });
       console.log('Kafka consumer reconnected');
-    } catch (reconnectErr) {
-      console.error('Kafka reconnect failed:', reconnectErr.message);
-    }
+    } catch (e) { console.error('Kafka reconnect failed:', e.message); }
   });
 
   producer.on('producer.disconnect', async () => {
@@ -161,37 +119,23 @@ async function run() {
       producer = kafka.producer();
       await producer.connect();
       console.log('Kafka producer reconnected');
-    } catch (err) {
-      console.error('Kafka producer reconnect failed:', err.message);
-    }
+    } catch (e) { console.error('Producer reconnect failed:', e.message); }
   });
 }
 
 async function gracefulShutdown(signal) {
-  console.log(`Received ${signal}, shutting down gracefully...`);
+  console.log(`Received ${signal}, shutting down...`);
   if (cleanupInterval) clearInterval(cleanupInterval);
-
-  const shutdownTasks = [];
-
-  if (kafkaConsumer) {
-    shutdownTasks.push(kafkaConsumer.disconnect().catch(err => console.error('Kafka consumer disconnect error:', err.message)));
-  }
-
-  if (producer) {
-    shutdownTasks.push(producer.disconnect().catch(err => console.error('Kafka producer disconnect error:', err.message)));
-  }
-
-  await Promise.all(shutdownTasks);
-  console.log('Shutdown complete');
+  const tasks = [];
+  if (kafkaConsumer) tasks.push(kafkaConsumer.disconnect().catch(() => {}));
+  if (producer) tasks.push(producer.disconnect().catch(() => {}));
+  await Promise.all(tasks);
   process.exit(0);
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+run().catch(console.error);
 
 module.exports = { processVote, cleanupStaleIPs, ipVotersMap, CLEANUP_INTERVAL_MS, STALE_THRESHOLD_MS };
